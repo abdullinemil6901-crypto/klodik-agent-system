@@ -41,25 +41,33 @@ class TestParseItems(unittest.TestCase):
         self.assertEqual(bot.parse_items("# просто текст"), [])
 
 
-class TestKeyboard(unittest.TestCase):
-    def test_only_grey_zone(self):
-        keyboard = bot.build_keyboard(bot.parse_items(DIGEST))
-        rows = keyboard["inline_keyboard"]
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0][0]["callback_data"], "w:JV-0002")
-        self.assertEqual(rows[0][1]["callback_data"], "s:JV-0002")
-        for row in rows:
-            for button in row:
-                self.assertLessEqual(len(button["callback_data"].encode()), 64)
+class TestCardKeyboard(unittest.TestCase):
+    def test_card_has_apply_link_and_decision_buttons(self):
+        item = bot.parse_items(DIGEST)[1]
+        rows = bot.card_keyboard(item)["inline_keyboard"]
+        self.assertEqual(rows[0][0]["url"], "https://example.com/2")
+        self.assertEqual(rows[1][0]["callback_data"], "w:JV-0002")
+        self.assertEqual(rows[1][1]["callback_data"], "s:JV-0002")
+        for button in rows[1]:
+            self.assertLessEqual(len(button["callback_data"].encode()), 64)
 
-    def test_decided_removed(self):
-        keyboard = bot.build_keyboard(bot.parse_items(DIGEST), decided={"JV-0002"})
-        self.assertEqual(len(keyboard["inline_keyboard"]), 1)
+    def test_decided_card_keeps_only_apply_link(self):
+        item = bot.parse_items(DIGEST)[1]
+        rows = bot.card_keyboard(item, decided=True)["inline_keyboard"]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("url", rows[0][0])
 
-    def test_all_decided_no_keyboard(self):
-        keyboard = bot.build_keyboard(bot.parse_items(DIGEST),
-                                      decided={"JV-0002", "JV-0003"})
-        self.assertIsNone(keyboard)
+
+class TestSplitCards(unittest.TestCase):
+    def test_summary_and_cards(self):
+        body = ("# Вакансии\n\n4 свежие вакансии\n\n"
+                "**[Роль А](https://example.com/1)**\nКомпания А · 85%\n\n"
+                "**[Роль Б](https://example.com/2)**\nКомпания Б · 60%")
+        summary, cards = bot.split_cards(body)
+        self.assertIn("4 свежие вакансии", summary)
+        self.assertNotIn("**[", summary)
+        self.assertEqual(len(cards), 2)
+        self.assertTrue(cards[0].startswith("**[Роль А]"))
 
 
 class TestJournal(unittest.TestCase):
@@ -118,10 +126,10 @@ class TestCallback(unittest.TestCase):
         self.assertIn("пропущена", journal_text)
         methods = [m for m, _ in calls]
         self.assertEqual(methods, ["editMessageReplyMarkup", "answerCallbackQuery"])
-        edit_payload = calls[0][1]
-        remaining = edit_payload["reply_markup"]["inline_keyboard"]
-        self.assertEqual(len(remaining), 1)  # осталась только JV-0002
-        self.assertIn("JV-0003", calls[1][1]["text"])
+        remaining = calls[0][1]["reply_markup"]["inline_keyboard"]
+        self.assertEqual(len(remaining), 1)  # осталась только ссылка «Откликнуться»
+        self.assertIn("url", remaining[0][0])
+        self.assertIn("Компания В", calls[1][1]["text"])
 
     def test_stale_button_answered_gracefully(self):
         ctx = make_ctx()
