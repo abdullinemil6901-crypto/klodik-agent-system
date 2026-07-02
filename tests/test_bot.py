@@ -80,9 +80,10 @@ class TestJournal(unittest.TestCase):
         self.assertIn("| Компания Б | AI Automation | 60 | telegram | к отправке |", line)
 
 
-def make_ctx(chat_id=42, journal=None, resume_dir=None):
+def make_ctx(chat_id=42, journal=None, resume_dir=None, extra_chats=()):
     return {"token": "t", "chat_id": chat_id, "digest_dir": None,
             "journal": journal, "resume_dir": resume_dir, "timeout": 1,
+            "extra_chats": set(extra_chats),
             "items": bot.parse_items(DIGEST), "decided": set()}
 
 
@@ -125,6 +126,32 @@ class TestAuthorization(unittest.TestCase):
         self.assertEqual(ctx["chat_id"], 42)
         save.assert_called_once_with(42)
         api.assert_called_once()
+
+    def test_extra_chat_allowed_for_callbacks(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(chat_id=42, journal=handle.name, extra_chats={77})
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb5", "data": "w:JV-0003",
+                                          "message": {"chat": {"id": 77}, "message_id": 3}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertIn("| JV-0003 |", journal_text)
+        self.assertTrue(calls)
+
+    def test_old_message_button_falls_back_to_journal(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(journal=handle.name)
+            ctx["items"] = []  # бот перезапущен, карточек в памяти нет
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb6", "data": "w:JV-0001",
+                                          "message": {"chat": {"id": 42}, "message_id": 4}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertIn("| JV-0001 |", journal_text)
+        self.assertIn("к отправке", journal_text)
+        self.assertIn("в работу", calls[-1][1]["text"])
 
     def test_unbound_ignores_non_start(self):
         ctx = make_ctx(chat_id=None)

@@ -213,21 +213,29 @@ def download_document(ctx, document):
     return target
 
 
+def allowed_chats(ctx):
+    """Привязанный чат + доверенные из TELEGRAM_CHAT_IDS (несколько аккаунтов)."""
+    allowed = set(ctx.get("extra_chats", ()))
+    if ctx["chat_id"] is not None:
+        allowed.add(ctx["chat_id"])
+    return allowed
+
+
 def handle_message(ctx, message):
     chat = message.get("chat", {}).get("id")
     text = (message.get("text") or "").strip()
     if ctx["chat_id"] is None:
-        # Самопривязка: первый /start фиксирует чат, дальше — только он
+        # Самопривязка: первый /start фиксирует чат
         if text.startswith("/start") and chat is not None:
             ctx["chat_id"] = chat
             save_binding(chat)
             api_call(ctx["token"], "sendMessage",
                      {"chat_id": chat, "text": WELCOME}, ctx["timeout"])
         return
-    if chat != ctx["chat_id"]:
+    if chat not in allowed_chats(ctx):
         return  # авторизация: бот публично доступен по имени, чужие чаты — игнор
     if text.startswith("/digest"):
-        send_digest(ctx)
+        send_digest(ctx, chat_id=chat)
         return
     if text.startswith("/status"):
         reply = status_text(ctx)
@@ -244,12 +252,12 @@ def handle_message(ctx, message):
         reply = ("Пришли резюме файлом или текстом — сохраню в память.\n"
                  "Команды: /digest — свежие вакансии, /status — состояние.")
     api_call(ctx["token"], "sendMessage",
-             {"chat_id": ctx["chat_id"], "text": reply}, ctx["timeout"])
+             {"chat_id": chat, "text": reply}, ctx["timeout"])
 
 
 def handle_callback(ctx, callback):
     chat = callback.get("message", {}).get("chat", {}).get("id")
-    if chat != ctx["chat_id"]:
+    if chat not in allowed_chats(ctx):
         return
     action, _, item_id = callback.get("data", "").partition(":")
     item = next((i for i in ctx.get("items", []) if i["id"] == item_id), None)
@@ -271,13 +279,20 @@ def handle_callback(ctx, callback):
             "message_id": callback["message"]["message_id"],
             "reply_markup": card_keyboard(item, decided=True),
         }, ctx["timeout"])
-    elif action == "i" and item_id and ctx["journal"]:
-        # Кнопка интервью с пакета: карточки может не быть в памяти — журналим по ID
+    elif action in ("w", "s", "i") and item_id and ctx["journal"]:
+        # Кнопка со старого сообщения: карточки нет в памяти бота — журналим по ID
+        status = {"w": "к отправке", "s": "пропущена", "i": "интервью"}[action]
+        step = {"w": "собрать пакет отклика", "s": "—",
+                "i": "подготовить разбор"}[action]
         line = (f"| {item_id} | {time.strftime('%Y-%m-%d')} | — | — | — "
-                f"| telegram | интервью | подготовить разбор |\n")
+                f"| telegram | {status} | {step} |\n")
         with open(ctx["journal"], "a", encoding="utf-8") as journal:
             journal.write(line)
-        answer["text"] = "готовлю разбор к интервью — пришлю сюда"
+        answer["text"] = {
+            "w": "беру в работу — пакет отклика придёт сюда",
+            "s": "скрыл, больше не покажу",
+            "i": "готовлю разбор к интервью — пришлю сюда",
+        }[action]
     else:
         answer["text"] = "кнопка устарела — пришли /digest заново"
     api_call(ctx["token"], "answerCallbackQuery", answer, ctx["timeout"])
@@ -337,9 +352,14 @@ def main(argv=None):
         print(f"токен не работает: {error}", file=sys.stderr)
         return 1
 
+    raw_ids = (os.environ.get("TELEGRAM_CHAT_IDS")
+               or file_values.get("TELEGRAM_CHAT_IDS") or "")
+    extra_chats = {int(part) for part in raw_ids.split(",") if part.strip().isdigit()}
+
     ctx = {
         "token": token,
         "chat_id": load_binding(),
+        "extra_chats": extra_chats,
         "digest_dir": args.digest_dir,
         "journal": args.journal,
         "resume_dir": args.resume_dir,
