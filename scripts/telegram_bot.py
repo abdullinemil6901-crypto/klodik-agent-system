@@ -112,9 +112,11 @@ def parse_items(text):
 def append_decision(journal_path, item, action):
     """Строка решения в журнал откликов (формат job_log.md)."""
     role, _, company = item["title"].partition(" — ")
-    status = "к отправке" if action == "w" else "пропущена"
+    status = {"w": "к отправке", "s": "пропущена", "i": "интервью"}[action]
+    step = ("собрать пакет отклика" if action == "w"
+            else "подготовить разбор интервью" if action == "i" else "—")
     line = (f"| {item['id']} | {time.strftime('%Y-%m-%d')} | {company or '—'} "
-            f"| {role} | {item['fit']} | telegram | {status} | решение из бота |\n")
+            f"| {role} | {item['fit']} | telegram | {status} | {step} |\n")
     with open(journal_path, "a", encoding="utf-8") as journal:
         journal.write(line)
 
@@ -252,20 +254,30 @@ def handle_callback(ctx, callback):
     action, _, item_id = callback.get("data", "").partition(":")
     item = next((i for i in ctx.get("items", []) if i["id"] == item_id), None)
     answer = {"callback_query_id": callback["id"]}
-    if action in ("w", "s") and item is not None:
+    if action in ("w", "s", "i") and item is not None:
         if ctx["journal"]:
             append_decision(ctx["journal"], item, action)
         ctx.setdefault("decided", set()).add(item_id)
         company = item["title"].partition(" — ")[2] or item["title"]
-        answer["text"] = (f"{company}: беру в работу — соберу резюме под вакансию "
-                          f"и письмо, пришлю сюда"
-                          if action == "w" else f"{company}: скрыта, больше не покажу")
+        replies = {
+            "w": f"{company}: беру в работу — соберу резюме под вакансию и письмо, пришлю сюда",
+            "s": f"{company}: скрыта, больше не покажу",
+            "i": f"{company}: готовлю разбор к интервью — компания, вероятные вопросы, что спросить самому",
+        }
+        answer["text"] = replies[action]
         # Кнопки решения убираются с карточки, ссылка на отклик остаётся
         api_call(ctx["token"], "editMessageReplyMarkup", {
             "chat_id": chat,
             "message_id": callback["message"]["message_id"],
             "reply_markup": card_keyboard(item, decided=True),
         }, ctx["timeout"])
+    elif action == "i" and item_id and ctx["journal"]:
+        # Кнопка интервью с пакета: карточки может не быть в памяти — журналим по ID
+        line = (f"| {item_id} | {time.strftime('%Y-%m-%d')} | — | — | — "
+                f"| telegram | интервью | подготовить разбор |\n")
+        with open(ctx["journal"], "a", encoding="utf-8") as journal:
+            journal.write(line)
+        answer["text"] = "готовлю разбор к интервью — пришлю сюда"
     else:
         answer["text"] = "кнопка устарела — пришли /digest заново"
     api_call(ctx["token"], "answerCallbackQuery", answer, ctx["timeout"])

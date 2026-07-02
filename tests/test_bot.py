@@ -153,6 +153,32 @@ class TestCallback(unittest.TestCase):
         self.assertIn("url", remaining[0][0])
         self.assertIn("Компания В", calls[1][1]["text"])
 
+    def test_interview_request_journaled(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(journal=handle.name)
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb3", "data": "i:JV-0002",
+                                          "message": {"chat": {"id": 42}, "message_id": 8}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertIn("| JV-0002 |", journal_text)
+        self.assertIn("интервью", journal_text)
+        self.assertIn("интервью", calls[-1][1]["text"])
+
+    def test_interview_without_card_context_still_journaled(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(journal=handle.name)
+            ctx["items"] = []  # бот перезапущен, карточек в памяти нет
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb4", "data": "i:JV-0009",
+                                          "message": {"chat": {"id": 42}, "message_id": 9}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertIn("| JV-0009 |", journal_text)
+        self.assertEqual([m for m, _ in calls], ["answerCallbackQuery"])
+
     def test_stale_button_answered_gracefully(self):
         ctx = make_ctx()
         calls = []
