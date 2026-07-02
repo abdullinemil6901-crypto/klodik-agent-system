@@ -32,14 +32,21 @@ ITEM_RE = re.compile(
     r'\s*fit:\s*(\d+),\s*zone:\s*(\w+)\}')
 
 WELCOME = (
-    "Клодик на связи. Чат привязан — сюда будут приходить дайджесты вакансий.\n\n"
-    "Команды:\n"
-    "/digest — свежий дайджест\n"
-    "/status — состояние системы\n\n"
-    "Под дайджестом — кнопки по вакансиям, где нужно твоё решение:\n"
-    "✅ В работу — готовим пакет отклика (резюме под вакансию + письмо), "
-    "в журнале появится статус «к отправке»\n"
-    "❌ Пропустить — вакансия помечается «пропущена» и больше не показывается"
+    "Клодик на связи. Чат привязан — сюда будут приходить карточки вакансий.\n\n"
+    "Как это работает:\n"
+    "🔗 Откликнуться — открыть вакансию на площадке\n"
+    "✅ В работу — готовлю пакет отклика: резюме, пересобранное под эту вакансию, "
+    "и письмо; пришлю сюда\n"
+    "❌ Скрыть — вакансия больше не покажется\n\n"
+    "Чтобы пакеты собирались из твоих реальных фактов — пришли сюда своё резюме "
+    "(файлом или просто текстом), я сохраню его в память системы.\n\n"
+    "Команды: /digest — свежие вакансии, /status — состояние."
+)
+
+RESUME_SAVED = (
+    "Резюме получил и сохранил в память. Теперь совпадения считаются по твоим "
+    "реальным фактам, а по кнопке «В работу» соберу резюме под конкретную "
+    "вакансию и письмо. Выдуманного опыта не будет — только переупаковка твоего."
 )
 
 
@@ -167,11 +174,41 @@ def status_text(ctx):
     digest_path = delivery.find_latest(ctx["digest_dir"]) if ctx["digest_dir"] else None
     if digest_path is not None:
         age_h = (time.time() - digest_path.stat().st_mtime) / 3600
-        lines.append(f"последний дайджест: {digest_path.name} ({age_h:.0f} ч назад)")
+        lines.append(f"последние вакансии: {age_h:.0f} ч назад")
     else:
-        lines.append("дайджестов пока нет")
-    lines.append(f"журнал: {ctx['journal'] or 'не подключён'}")
+        lines.append("вакансий пока не приходило")
+    if ctx.get("resume_dir") and any(Path(ctx["resume_dir"]).glob("*")):
+        lines.append("резюме: в памяти, совпадения считаются по нему")
+    else:
+        lines.append("резюме: нет — пришли файлом или текстом, без него пакеты не собрать")
+    lines.append(f"журнал откликов: {ctx['journal'] or 'не подключён'}")
     return "\n".join(lines)
+
+
+def save_resume_text(ctx, text):
+    target = Path(ctx["resume_dir"]) / "master_resume_raw.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text + "\n", encoding="utf-8")
+    return target
+
+
+def download_document(ctx, document):
+    """Файл резюме из Telegram → папка резюме в vault."""
+    info = api_call(ctx["token"], "getFile",
+                    {"file_id": document["file_id"]}, ctx["timeout"])
+    file_path = info.get("result", {}).get("file_path")
+    if not file_path:
+        raise BotError("getFile: ответ без file_path")
+    url = f"https://api.telegram.org/file/bot{ctx['token']}/{file_path}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            data = response.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        raise BotError(f"скачивание файла: {type(error).__name__}")
+    target = Path(ctx["resume_dir"]) / (document.get("file_name") or Path(file_path).name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target
 
 
 def handle_message(ctx, message):
@@ -194,8 +231,16 @@ def handle_message(ctx, message):
         reply = status_text(ctx)
     elif text.startswith("/start"):
         reply = WELCOME
+    elif message.get("document") and ctx.get("resume_dir"):
+        download_document(ctx, message["document"])
+        reply = RESUME_SAVED
+    elif len(text) >= 400 and not text.startswith("/") and ctx.get("resume_dir"):
+        # Длинный текст без команды — это резюме, присланное сообщением
+        save_resume_text(ctx, text)
+        reply = RESUME_SAVED
     else:
-        reply = "команды: /digest — свежий дайджест, /status — состояние"
+        reply = ("Пришли резюме файлом или текстом — сохраню в память.\n"
+                 "Команды: /digest — свежие вакансии, /status — состояние.")
     api_call(ctx["token"], "sendMessage",
              {"chat_id": ctx["chat_id"], "text": reply}, ctx["timeout"])
 
@@ -212,7 +257,8 @@ def handle_callback(ctx, callback):
             append_decision(ctx["journal"], item, action)
         ctx.setdefault("decided", set()).add(item_id)
         company = item["title"].partition(" — ")[2] or item["title"]
-        answer["text"] = (f"{company}: беру в работу — готовлю пакет отклика"
+        answer["text"] = (f"{company}: беру в работу — соберу резюме под вакансию "
+                          f"и письмо, пришлю сюда"
                           if action == "w" else f"{company}: скрыта, больше не покажу")
         # Кнопки решения убираются с карточки, ссылка на отклик остаётся
         api_call(ctx["token"], "editMessageReplyMarkup", {
@@ -261,6 +307,7 @@ def main(argv=None):
     parser.add_argument("--env-file", help="KEY=VALUE файл с TELEGRAM_BOT_TOKEN вне репозитория")
     parser.add_argument("--digest-dir", help="папка дайджестов в vault (для /digest)")
     parser.add_argument("--journal", help="файл журнала откликов (job_log.md) для записи решений")
+    parser.add_argument("--resume-dir", help="папка vault для присланного резюме")
     parser.add_argument("--once", action="store_true",
                         help="один цикл getUpdates и выход (отладка)")
     args = parser.parse_args(argv)
@@ -283,6 +330,7 @@ def main(argv=None):
         "chat_id": load_binding(),
         "digest_dir": args.digest_dir,
         "journal": args.journal,
+        "resume_dir": args.resume_dir,
         "timeout": 10,
     }
     name = me.get("username", "?")
