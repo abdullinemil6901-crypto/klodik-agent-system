@@ -80,10 +80,32 @@ class TestJournal(unittest.TestCase):
         self.assertIn("| Компания Б | AI Automation | 60 | telegram | к отправке |", line)
 
 
-def make_ctx(chat_id=42, journal=None):
+def make_ctx(chat_id=42, journal=None, resume_dir=None):
     return {"token": "t", "chat_id": chat_id, "digest_dir": None,
-            "journal": journal, "timeout": 1,
+            "journal": journal, "resume_dir": resume_dir, "timeout": 1,
             "items": bot.parse_items(DIGEST), "decided": set()}
+
+
+class TestResumeIntake(unittest.TestCase):
+    def test_long_text_saved_as_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = make_ctx(resume_dir=tmp)
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append(p)):
+                bot.handle_message(ctx, {"chat": {"id": 42},
+                                         "text": "Опыт работы: " + "х" * 400})
+            saved = Path(tmp) / "master_resume_raw.md"
+            self.assertTrue(saved.is_file())
+            self.assertIn("Опыт работы", saved.read_text(encoding="utf-8"))
+            self.assertEqual(calls[0]["text"], bot.RESUME_SAVED)
+
+    def test_short_text_gets_help_not_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = make_ctx(resume_dir=tmp)
+            with mock.patch.object(bot, "api_call"):
+                bot.handle_message(ctx, {"chat": {"id": 42}, "text": "привет"})
+            self.assertFalse((Path(tmp) / "master_resume_raw.md").exists())
 
 
 class TestAuthorization(unittest.TestCase):
