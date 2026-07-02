@@ -32,9 +32,14 @@ ITEM_RE = re.compile(
     r'\s*fit:\s*(\d+),\s*zone:\s*(\w+)\}')
 
 WELCOME = (
-    "Клодик на связи. Чат привязан — сюда будут приходить дайджесты.\n"
-    "Команды: /digest — свежий дайджест вакансий, /status — состояние.\n"
-    "По вакансиям серой зоны под дайджестом будут кнопки решений."
+    "Клодик на связи. Чат привязан — сюда будут приходить дайджесты вакансий.\n\n"
+    "Команды:\n"
+    "/digest — свежий дайджест\n"
+    "/status — состояние системы\n\n"
+    "Под дайджестом — кнопки по вакансиям, где нужно твоё решение:\n"
+    "✅ В работу — готовим пакет отклика (резюме под вакансию + письмо), "
+    "в журнале появится статус «к отправке»\n"
+    "❌ Пропустить — вакансия помечается «пропущена» и больше не показывается"
 )
 
 
@@ -106,9 +111,11 @@ def build_keyboard(items, decided=()):
         take, skip = f"w:{item['id']}", f"s:{item['id']}"
         if max(len(take.encode()), len(skip.encode())) > MAX_CALLBACK_DATA:
             continue  # контракт digest_format.md требует короткие ID
+        # На кнопке — компания, а не внутренний ID: понятно, к какой вакансии
+        company = item["title"].partition(" — ")[2] or item["title"]
         rows.append([
-            {"text": f"{item['id']} — в работу", "callback_data": take},
-            {"text": "пропустить", "callback_data": skip},
+            {"text": f"✅ В работу — {company[:24]}", "callback_data": take},
+            {"text": "❌ Пропустить", "callback_data": skip},
         ])
     return {"inline_keyboard": rows} if rows else None
 
