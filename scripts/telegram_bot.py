@@ -102,24 +102,6 @@ def parse_items(text):
     ]
 
 
-def build_keyboard(items, decided=()):
-    """Кнопки решений только по серой зоне; уже решённые исчезают."""
-    rows = []
-    for item in items:
-        if item["zone"] != "grey" or item["id"] in decided:
-            continue
-        take, skip = f"w:{item['id']}", f"s:{item['id']}"
-        if max(len(take.encode()), len(skip.encode())) > MAX_CALLBACK_DATA:
-            continue  # контракт digest_format.md требует короткие ID
-        # На кнопке — компания, а не внутренний ID: понятно, к какой вакансии
-        company = item["title"].partition(" — ")[2] or item["title"]
-        rows.append([
-            {"text": f"✅ В работу — {company[:24]}", "callback_data": take},
-            {"text": "❌ Пропустить", "callback_data": skip},
-        ])
-    return {"inline_keyboard": rows} if rows else None
-
-
 def append_decision(journal_path, item, action):
     """Строка решения в журнал откликов (формат job_log.md)."""
     role, _, company = item["title"].partition(" — ")
@@ -132,24 +114,52 @@ def append_decision(journal_path, item, action):
 
 # --- Обработчики ------------------------------------------------------------
 
-def send_digest(ctx):
+def card_keyboard(item, decided=False):
+    """Кнопки одной карточки: отклик — ссылкой, решение — колбэками."""
+    rows = [[{"text": "🔗 Откликнуться", "url": item["url"]}]]
+    if not decided:
+        rows.append([
+            {"text": "✅ В работу", "callback_data": f"w:{item['id']}"},
+            {"text": "❌ Скрыть", "callback_data": f"s:{item['id']}"},
+        ])
+    return {"inline_keyboard": rows}
+
+
+def split_cards(body):
+    """Тело дайджеста → (сводка, блоки-карточки). Карточка начинается с **[Роль](url)**."""
+    blocks = re.split(r"\n(?=\*\*\[)", body)
+    summary = blocks[0].strip()
+    return summary, [b.strip() for b in blocks[1:] if b.strip()]
+
+
+def send_digest(ctx, chat_id=None):
+    """Стандарт рынка: одна вакансия = одна карточка = отдельное сообщение."""
+    chat_id = chat_id or ctx["chat_id"]
     digest_path = delivery.find_latest(ctx["digest_dir"]) if ctx["digest_dir"] else None
     if digest_path is None:
         api_call(ctx["token"], "sendMessage",
-                 {"chat_id": ctx["chat_id"],
-                  "text": "дайджестов пока нет — дождись прогона конвейера"},
+                 {"chat_id": chat_id,
+                  "text": "свежих вакансий пока нет — пришлю, как появятся"},
                  ctx["timeout"])
         return
     text = digest_path.read_text(encoding="utf-8")
     _, body = delivery.split_front_matter(text)
     ctx["items"] = parse_items(text)
     ctx["decided"] = set()
-    parts = delivery.split_message(delivery.md_to_html(body))
-    config = {"token": ctx["token"], "chat_id": ctx["chat_id"],
-              "timeout": ctx["timeout"], "retries": 3}
-    for index, part in enumerate(parts):
-        keyboard = build_keyboard(ctx["items"]) if index == len(parts) - 1 else None
-        delivery.send_message(part, config, reply_markup=keyboard)
+    summary, cards = split_cards(body)
+
+    def send(html, keyboard=None):
+        payload = {"chat_id": chat_id, "text": html, "parse_mode": "HTML",
+                   "disable_web_page_preview": True}
+        if keyboard:
+            payload["reply_markup"] = keyboard
+        api_call(ctx["token"], "sendMessage", payload, ctx["timeout"])
+
+    send(delivery.md_to_html(summary))
+    for card in cards:
+        item = next((i for i in ctx["items"] if i["url"] in card), None)
+        send(delivery.md_to_html(card),
+             card_keyboard(item) if item is not None else None)
 
 
 def status_text(ctx):
@@ -201,12 +211,14 @@ def handle_callback(ctx, callback):
         if ctx["journal"]:
             append_decision(ctx["journal"], item, action)
         ctx.setdefault("decided", set()).add(item_id)
-        answer["text"] = f"{item_id}: {'в работу' if action == 'w' else 'пропущена'}"
-        keyboard = build_keyboard(ctx["items"], ctx["decided"])
+        company = item["title"].partition(" — ")[2] or item["title"]
+        answer["text"] = (f"{company}: беру в работу — готовлю пакет отклика"
+                          if action == "w" else f"{company}: скрыта, больше не покажу")
+        # Кнопки решения убираются с карточки, ссылка на отклик остаётся
         api_call(ctx["token"], "editMessageReplyMarkup", {
             "chat_id": chat,
             "message_id": callback["message"]["message_id"],
-            "reply_markup": keyboard or {"inline_keyboard": []},
+            "reply_markup": card_keyboard(item, decided=True),
         }, ctx["timeout"])
     else:
         answer["text"] = "кнопка устарела — пришли /digest заново"
