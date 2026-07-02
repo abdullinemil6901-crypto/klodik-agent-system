@@ -23,6 +23,7 @@ from pathlib import Path
 API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/sendMessage"
 MAX_MESSAGE_LEN = 4096
 STATE_FILE = Path.home() / ".local" / "state" / "klodik" / "sent_digests.json"
+BINDING_FILE = Path.home() / ".local" / "state" / "klodik" / "bot_binding.json"
 FAILURE_LOG_NAME = "delivery_failures.md"
 
 EXIT_OK = 0
@@ -72,10 +73,17 @@ def resolve_config(env_file):
 
     token = get("TELEGRAM_BOT_TOKEN")
     chat_id = get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        # Фолбэк: чат, привязанный ботом (scripts/telegram_bot.py) через /start
+        try:
+            chat_id = json.loads(BINDING_FILE.read_text(encoding="utf-8")).get("chat_id")
+        except (OSError, ValueError):
+            pass
     if not token or not chat_id:
         raise SystemExit(_config_error(
-            "не заданы TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID "
-            "(окружение или --env-file); шаблон: scripts/telegram.env.example"))
+            "не задан TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID (окружение или "
+            "--env-file; chat_id также привязывается через /start бота); "
+            "шаблон: scripts/telegram.env.example"))
     def numeric(key, default, cast):
         raw = get(key, default)
         try:

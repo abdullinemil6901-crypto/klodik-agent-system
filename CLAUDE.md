@@ -22,6 +22,6 @@
 - `docs/demo_verifier_run.md` — разбор живого прогона adversarial-проверки фактов.
 - `docs/pipelines.md` — спецификации двух прикладных конвейеров (радар новостей, подбор вакансий).
 - `docs/telegram_bot.md` — спецификация модуля Telegram-доставки: контракт дайджеста, сбои, фаза 2.
-- `scripts/` — код доставки: `telegram_digest.py` (stdlib, без зависимостей) и `telegram.env.example`.
+- `scripts/` — код Telegram-модуля (stdlib, без зависимостей): `telegram_digest.py` (push), `telegram_bot.py` (интерактив), `telegram.env.example`.
 - `tests/` — юнит-тесты конвертера и санитизации (`python3 -m unittest discover tests`).
 - `vault-template/` — обезличенный скелет файловой памяти: можно склонировать и заполнить под себя.
