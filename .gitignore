@@ -6,3 +6,13 @@ vault/
 .claude/settings.local.json
 .DS_Store
 *.zip
+
+# Секреты — только через env, в репо не попадают
+*.env
+!*.env.example
+
+# Python-артефакты
+__pycache__/
+*.pyc
+.venv/
+venv/
