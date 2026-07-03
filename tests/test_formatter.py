@@ -138,6 +138,19 @@ class TestTokenSanitization(unittest.TestCase):
         self.assertIn("bot was blocked", message)
 
 
+class TestMultipartBody(unittest.TestCase):
+    def test_fields_file_and_boundaries(self):
+        body = td._multipart_body(
+            {"chat_id": "42", "caption": "письмо"},
+            "резюме.pdf", b"%PDF-1.4 data", "BND")
+        self.assertIn(b'name="chat_id"\r\n\r\n42\r\n', body)
+        self.assertIn("письмо".encode("utf-8"), body)
+        self.assertIn('filename="резюме.pdf"'.encode("utf-8"), body)
+        self.assertIn(b"%PDF-1.4 data", body)
+        self.assertTrue(body.startswith(b"--BND\r\n"))
+        self.assertTrue(body.endswith(b"--BND--\r\n"))
+
+
 class TestBadRequestFallback(unittest.TestCase):
     def test_400_resends_plain_text(self):
         config = {"token": "t", "chat_id": "1", "timeout": 0.1, "retries": 1}

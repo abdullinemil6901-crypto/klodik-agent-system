@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- Обезличенный A4-шаблон резюме под вакансию. Токены {{...}} заполняет
+     конвейер (pipelines.md §2, шаг «Подгонка»); печать в PDF:
+     chromium --headless --no-sandbox --print-to-pdf=out.pdf template.html -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; margin: 0;
+         padding: 34px 44px; color: #1c1c1c; font-size: 10.5pt; line-height: 1.5; }
+  h1 { font-size: 21pt; margin: 0; letter-spacing: .2px; }
+  .role { color: #2456a6; font-weight: 600; font-size: 12.5pt; margin: 3px 0 2px; }
+  .target { color: #666; font-size: 9.5pt; margin-bottom: 14px; }
+  .contacts { color: #444; font-size: 9.5pt; margin-bottom: 6px; }
+  h2 { font-size: 10.5pt; text-transform: uppercase; letter-spacing: 1px;
+       color: #2456a6; border-bottom: 1.5px solid #dfe6f2;
+       padding-bottom: 3px; margin: 16px 0 7px; }
+  ul { margin: 5px 0; padding-left: 18px; }
+  li { margin-bottom: 4px; }
+  .item-head { font-weight: 600; }
+  .muted { color: #666; }
+  a { color: #2456a6; text-decoration: none; }
+</style>
+</head>
+<body>
+  <h1>{{name}}</h1>
+  <div class="role">{{headline}}</div>
+  <div class="contacts">{{contacts}}</div>
+  <div class="target">Резюме подготовлено под вакансию: {{vacancy}}</div>
+
+  <h2>Кратко</h2>
+  <p>{{summary}}</p>
+
+  <h2>Навыки под задачи вакансии</h2>
+  <ul>{{skills}}</ul>
+
+  <h2>Ключевой проект</h2>
+  <p class="item-head">{{project_title}}</p>
+  <ul>{{project_points}}</ul>
+
+  <h2>Опыт</h2>
+  <ul>{{experience}}</ul>
+
+  <h2>Условия и контекст</h2>
+  <ul>{{conditions}}</ul>
+</body>
+</html>

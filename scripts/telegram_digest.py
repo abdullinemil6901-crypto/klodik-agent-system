@@ -255,6 +255,48 @@ def send_message(text, config, parse_mode="HTML", reply_markup=None):
             raise DeliveryError(f"сеть недоступна: {type(error).__name__}: {reason}")
 
 
+def _multipart_body(fields, filename, file_bytes, boundary):
+    """Тело multipart/form-data для sendDocument — stdlib, без requests."""
+    parts = []
+    for name, value in fields.items():
+        parts.append(
+            (f'--{boundary}\r\nContent-Disposition: form-data; '
+             f'name="{name}"\r\n\r\n{value}\r\n').encode("utf-8"))
+    parts.append(
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="document"; '
+         f'filename="{filename}"\r\nContent-Type: application/octet-stream'
+         f'\r\n\r\n').encode("utf-8"))
+    parts.append(file_bytes)
+    parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(parts)
+
+
+def send_document(path, config, caption=None, reply_markup=None):
+    """Файл в чат (sendDocument). Ошибки чистые: без токена и URL."""
+    path = Path(path)
+    fields = {"chat_id": str(config["chat_id"])}
+    if caption:
+        fields["caption"] = caption[:1024]
+    if reply_markup:
+        fields["reply_markup"] = json.dumps(reply_markup)
+    boundary = "klodik" + hashlib.sha256(path.name.encode()).hexdigest()[:24]
+    body = _multipart_body(fields, path.name, path.read_bytes(), boundary)
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{config['token']}/sendDocument",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=max(30.0, config["timeout"])) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        description = _read_error_body(error).get("description", "нет описания")
+        raise DeliveryError(f"sendDocument HTTP {error.code}: {description}")
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        reason = getattr(error, "reason", error)
+        raise DeliveryError(f"sendDocument: сеть: {type(error).__name__}: {reason}")
+
+
 def _read_error_body(http_error):
     try:
         return json.loads(http_error.read().decode("utf-8"))
