@@ -35,7 +35,16 @@ class TestParseItems(unittest.TestCase):
         self.assertEqual([i["id"] for i in items], ["JV-0001", "JV-0002", "JV-0003"])
         self.assertEqual(items[1],
                          {"id": "JV-0002", "title": "AI Automation — Компания Б",
-                          "url": "https://example.com/2", "fit": 60, "zone": "grey"})
+                          "url": "https://example.com/2", "fit": 60, "zone": "grey",
+                          "source": "hh", "contact": ""})
+
+    def test_item_with_source_and_contact(self):
+        digest = ('---\nitems:\n  - {id: JV-0009, title: "Роль — Компания", '
+                  'url: "https://t.me/chan/5", fit: 70, zone: work, '
+                  'source: telegram, contact: "@author"}\n---\nтело')
+        item = bot.parse_items(digest)[0]
+        self.assertEqual(item["source"], "telegram")
+        self.assertEqual(item["contact"], "@author")
 
     def test_no_front_matter(self):
         self.assertEqual(bot.parse_items("# просто текст"), [])
@@ -50,6 +59,13 @@ class TestCardKeyboard(unittest.TestCase):
         self.assertEqual(rows[1][1]["callback_data"], "s:JV-0002")
         for button in rows[1]:
             self.assertLessEqual(len(button["callback_data"].encode()), 64)
+
+    def test_telegram_card_links_to_author(self):
+        item = {"id": "JV-0009", "title": "Роль — Компания", "url": "https://t.me/chan/5",
+                "fit": 70, "zone": "work", "source": "telegram", "contact": "@author"}
+        rows = bot.card_keyboard(item)["inline_keyboard"]
+        self.assertEqual(rows[0][0]["text"], "Написать автору")
+        self.assertEqual(rows[0][0]["url"], "https://t.me/author")
 
     def test_decided_card_keeps_only_apply_link(self):
         item = bot.parse_items(DIGEST)[1]

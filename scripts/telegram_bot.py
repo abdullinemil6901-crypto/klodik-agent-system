@@ -26,10 +26,11 @@ API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT_SEC = 50
 MAX_CALLBACK_DATA = 64  # лимит Telegram на callback_data
 
-# Строка items[] по контракту digest_format.md
+# Строка items[] по контракту digest_format.md; source и contact — опциональны
 ITEM_RE = re.compile(
     r'-\s*\{id:\s*([\w-]+),\s*title:\s*"([^"]*)",\s*url:\s*"([^"]*)",'
-    r'\s*fit:\s*(\d+),\s*zone:\s*(\w+)\}')
+    r'\s*fit:\s*(\d+),\s*zone:\s*(\w+)'
+    r'(?:,\s*source:\s*(\w+))?(?:,\s*contact:\s*"([^"]*)")?\}')
 
 WELCOME = (
     "Клодик на связи. Чат привязан — сюда будут приходить карточки вакансий.\n\n"
@@ -104,7 +105,8 @@ def parse_items(text):
     if end == -1:
         return []
     return [
-        {"id": m[0], "title": m[1], "url": m[2], "fit": int(m[3]), "zone": m[4]}
+        {"id": m[0], "title": m[1], "url": m[2], "fit": int(m[3]), "zone": m[4],
+         "source": m[5] or "hh", "contact": m[6]}
         for m in ITEM_RE.findall(text[4:end])
     ]
 
@@ -126,12 +128,17 @@ def append_decision(journal_path, item, action):
 # --- Обработчики ------------------------------------------------------------
 
 def card_keyboard(item, decided=False):
-    """Кнопки одной карточки: отклик — ссылкой, решение — колбэками."""
-    rows = [[{"text": "🔗 Откликнуться", "url": item["url"]}]]
+    """Кнопки одной карточки. Telegram-вакансия — прямой контакт с автором."""
+    if item.get("contact"):
+        first = {"text": "Написать автору",
+                 "url": f"https://t.me/{item['contact'].lstrip('@')}"}
+    else:
+        first = {"text": "Открыть", "url": item["url"]}
+    rows = [[first]]
     if not decided:
         rows.append([
-            {"text": "✅ В работу", "callback_data": f"w:{item['id']}"},
-            {"text": "❌ Скрыть", "callback_data": f"s:{item['id']}"},
+            {"text": "✓ В работу", "callback_data": f"w:{item['id']}"},
+            {"text": "✕ Скрыть", "callback_data": f"s:{item['id']}"},
         ])
     return {"inline_keyboard": rows}
 
@@ -332,7 +339,7 @@ def handle_callback(ctx, callback):
         ctx.setdefault("decided", set()).add(item_id)
         company = item["title"].partition(" — ")[2] or item["title"]
         replies = {
-            "w": f"{company}: беру в работу — соберу резюме под вакансию и письмо, пришлю сюда",
+            "w": f"{company}: беру в работу — PDF-резюме и разбор придут сюда в течение пары минут",
             "s": f"{company}: скрыта, больше не покажу",
             "i": f"{company}: готовлю разбор к интервью — компания, вероятные вопросы, что спросить самому",
             "d": f"{company}: записал как отправленную — если ответа не будет 4 дня, напомню с черновиком follow-up",
