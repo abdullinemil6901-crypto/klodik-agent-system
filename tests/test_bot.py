@@ -216,6 +216,39 @@ class TestCallback(unittest.TestCase):
         self.assertEqual([m for m, _ in calls], ["answerCallbackQuery"])
 
 
+class TestPipeline(unittest.TestCase):
+    JOURNAL = """# журнал
+| ID | Дата | Компания | Роль | fit% | Канал | Статус | Следующий шаг |
+|---|---|---|---|---|---|---|---|
+| JV-0001 | 2026-07-02 | Интегратор | MolecularMeal | 85 | hh | пакет готов | — |
+| JV-0002 | 2026-07-02 | Инженер | Ayo | 75 | hh | пакет готов | — |
+| JV-0001 | 2026-07-03 | — | — | — | telegram | отправлена | follow-up |
+"""
+
+    def test_last_status_wins_and_grouped(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(self.JOURNAL)
+        text = bot.pipeline_text(make_ctx(journal=handle.name))
+        self.assertIn("📤 Отправлены", text)
+        self.assertIn("🛠 В работе", text)
+        # JV-0001 после «отправлена» не должен висеть в «в работе»
+        in_work = text.split("📤")[0]
+        self.assertNotIn("JV-0001", in_work)
+
+    def test_sent_action_journaled(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(journal=handle.name)
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb7", "data": "d:JV-0002",
+                                          "message": {"chat": {"id": 42}, "message_id": 5}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertIn("отправлена", journal_text)
+        self.assertIn("follow-up", calls[-1][1]["text"])
+
+
 class TestChatIdFallback(unittest.TestCase):
     def test_digest_config_uses_binding_file(self):
         with tempfile.TemporaryDirectory() as tmp:

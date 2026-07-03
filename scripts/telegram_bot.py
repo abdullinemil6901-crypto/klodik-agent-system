@@ -112,9 +112,11 @@ def parse_items(text):
 def append_decision(journal_path, item, action):
     """Строка решения в журнал откликов (формат job_log.md)."""
     role, _, company = item["title"].partition(" — ")
-    status = {"w": "к отправке", "s": "пропущена", "i": "интервью"}[action]
-    step = ("собрать пакет отклика" if action == "w"
-            else "подготовить разбор интервью" if action == "i" else "—")
+    status = {"w": "к отправке", "s": "пропущена", "i": "интервью",
+              "d": "отправлена"}[action]
+    step = {"w": "собрать пакет отклика", "s": "—",
+            "i": "подготовить разбор интервью",
+            "d": "follow-up через 4 дня"}[action]
     line = (f"| {item['id']} | {time.strftime('%Y-%m-%d')} | {company or '—'} "
             f"| {role} | {item['fit']} | telegram | {status} | {step} |\n")
     with open(journal_path, "a", encoding="utf-8") as journal:
@@ -169,6 +171,64 @@ def send_digest(ctx, chat_id=None):
         item = next((i for i in ctx["items"] if i["url"] in card), None)
         send(delivery.md_to_html(card),
              card_keyboard(item) if item is not None else None)
+
+
+def setup_bot_menu(token, timeout):
+    """Меню команд и описание — витрина бота в Telegram."""
+    api_call(token, "setMyCommands", {"commands": [
+        {"command": "digest", "description": "Свежие вакансии карточками"},
+        {"command": "pipeline", "description": "Воронка откликов: что на каком шаге"},
+        {"command": "profile", "description": "Что система знает обо мне"},
+        {"command": "status", "description": "Состояние системы"},
+    ]}, timeout)
+    api_call(token, "setMyShortDescription", {
+        "short_description": "Личный агент поиска работы: вакансии, пакеты откликов, журнал",
+    }, timeout)
+
+
+STATUS_GROUPS = [
+    ("🛠 В работе (пакет готовится или готов)", {"к отправке", "пакет готов"}),
+    ("📤 Отправлены — ждём ответа", {"отправлена", "follow-up отправлен"}),
+    ("🎤 Интервью", {"интервью", "разбор готов"}),
+    ("📥 Найдены, решение не принято", {"найдена"}),
+    ("💤 Пропущены", {"пропущена"}),
+]
+
+
+def pipeline_text(ctx):
+    """Воронка откликов из журнала: по строке на вакансию, последний статус побеждает."""
+    if not ctx["journal"] or not Path(ctx["journal"]).is_file():
+        return "журнал откликов не подключён"
+    rows = {}
+    for line in Path(ctx["journal"]).read_text(encoding="utf-8").splitlines():
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) >= 8 and cells[1].startswith("JV-"):
+            rows[cells[1]] = cells  # дубли по ID: последняя строка актуальна
+    if not rows:
+        return "воронка пуста — жду свежих вакансий"
+    lines = []
+    for title, statuses in STATUS_GROUPS:
+        matched = [c for c in rows.values() if c[7] in statuses]
+        if matched:
+            lines.append(title)
+            for cells in matched:
+                name = f"{cells[4]} — {cells[3]}" if cells[3] != "—" else cells[1]
+                lines.append(f"  • {name} ({cells[5]}%)" if cells[5] != "—" else f"  • {name}")
+    return "\n".join(lines) if lines else "воронка пуста"
+
+
+def profile_text(ctx):
+    resume = None
+    if ctx.get("resume_dir") and Path(ctx["resume_dir"]).is_dir():
+        resume = max(Path(ctx["resume_dir"]).glob("*"),
+                     key=lambda p: p.stat().st_mtime, default=None)
+    if resume is None:
+        return ("резюме в памяти нет — пришли файлом или текстом, "
+                "без него совпадения прикидочные, а пакеты не собрать")
+    age_h = (time.time() - resume.stat().st_mtime) / 3600
+    return (f"резюме: {resume.name}, обновлено {age_h:.0f} ч назад\n"
+            "обновить — просто пришли новую версию файлом или текстом\n"
+            "по нему считаются совпадения и собираются пакеты откликов")
 
 
 def status_text(ctx):
@@ -239,6 +299,10 @@ def handle_message(ctx, message):
         return
     if text.startswith("/status"):
         reply = status_text(ctx)
+    elif text.startswith("/pipeline"):
+        reply = pipeline_text(ctx)
+    elif text.startswith("/profile"):
+        reply = profile_text(ctx)
     elif text.startswith("/start"):
         reply = WELCOME
     elif message.get("document") and ctx.get("resume_dir"):
@@ -262,7 +326,7 @@ def handle_callback(ctx, callback):
     action, _, item_id = callback.get("data", "").partition(":")
     item = next((i for i in ctx.get("items", []) if i["id"] == item_id), None)
     answer = {"callback_query_id": callback["id"]}
-    if action in ("w", "s", "i") and item is not None:
+    if action in ("w", "s", "i", "d") and item is not None:
         if ctx["journal"]:
             append_decision(ctx["journal"], item, action)
         ctx.setdefault("decided", set()).add(item_id)
@@ -271,6 +335,7 @@ def handle_callback(ctx, callback):
             "w": f"{company}: беру в работу — соберу резюме под вакансию и письмо, пришлю сюда",
             "s": f"{company}: скрыта, больше не покажу",
             "i": f"{company}: готовлю разбор к интервью — компания, вероятные вопросы, что спросить самому",
+            "d": f"{company}: записал как отправленную — если ответа не будет 4 дня, напомню с черновиком follow-up",
         }
         answer["text"] = replies[action]
         # Кнопки решения убираются с карточки, ссылка на отклик остаётся
@@ -279,11 +344,12 @@ def handle_callback(ctx, callback):
             "message_id": callback["message"]["message_id"],
             "reply_markup": card_keyboard(item, decided=True),
         }, ctx["timeout"])
-    elif action in ("w", "s", "i") and item_id and ctx["journal"]:
+    elif action in ("w", "s", "i", "d") and item_id and ctx["journal"]:
         # Кнопка со старого сообщения: карточки нет в памяти бота — журналим по ID
-        status = {"w": "к отправке", "s": "пропущена", "i": "интервью"}[action]
+        status = {"w": "к отправке", "s": "пропущена", "i": "интервью",
+                  "d": "отправлена"}[action]
         step = {"w": "собрать пакет отклика", "s": "—",
-                "i": "подготовить разбор"}[action]
+                "i": "подготовить разбор", "d": "follow-up через 4 дня"}[action]
         line = (f"| {item_id} | {time.strftime('%Y-%m-%d')} | — | — | — "
                 f"| telegram | {status} | {step} |\n")
         with open(ctx["journal"], "a", encoding="utf-8") as journal:
@@ -292,6 +358,7 @@ def handle_callback(ctx, callback):
             "w": "беру в работу — пакет отклика придёт сюда",
             "s": "скрыл, больше не покажу",
             "i": "готовлю разбор к интервью — пришлю сюда",
+            "d": "записал как отправленную — напомню про follow-up через 4 дня",
         }[action]
     else:
         answer["text"] = "кнопка устарела — пришли /digest заново"
@@ -351,6 +418,10 @@ def main(argv=None):
     except BotError as error:
         print(f"токен не работает: {error}", file=sys.stderr)
         return 1
+    try:
+        setup_bot_menu(token, 10)
+    except BotError as error:
+        print(f"меню не настроено (не критично): {error}", file=sys.stderr)
 
     raw_ids = (os.environ.get("TELEGRAM_CHAT_IDS")
                or file_values.get("TELEGRAM_CHAT_IDS") or "")
