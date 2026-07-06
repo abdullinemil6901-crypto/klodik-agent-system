@@ -52,7 +52,7 @@ Multi-agent — не дефолт, а инструмент под конкрет
 
 ## 4. Рутины и доставка
 
-- Плановые прогоны — cron-механика Claude Code (радар новостей по расписанию).
+- Плановые прогоны — OS cron + headless-запуск Claude Code; промты прогонов версионируются в [routines/](../routines/README.md), правка файла меняет поведение рутины без правки crontab.
 - Отчёты пишутся в vault — Obsidian синхронизирует их на любое устройство.
 - Telegram-доставка готова в обе стороны ([спека](telegram_bot.md)): push дайджестов из vault ([telegram_digest.py](../scripts/telegram_digest.py)) и интерактивный бот с кнопками решений, пишущий выбор человека обратно в журнал vault ([telegram_bot.py](../scripts/telegram_bot.py)). Принцип: vault — источник истины, Telegram — интерфейс. Дальше по MVP-пути: голос → разбивка на роли.
 
