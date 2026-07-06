@@ -1,0 +1,26 @@
+# Пример user-юнита systemd для интерактивного бота: упавший процесс
+# перезапускается сам, логи — в journalctl, а не в никуда.
+#
+# Установка:
+#   cp scripts/klodik-bot.service.example ~/.config/systemd/user/klodik-bot.service
+#   # поправить пути к репозиторию и vault ниже
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now klodik-bot
+# Логи: journalctl --user -u klodik-bot -f
+
+[Unit]
+Description=Klodik Telegram bot (interactive delivery)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/klodik-agent-system/scripts/telegram_bot.py \
+    --env-file %h/.klodik/telegram.env \
+    --digest-dir "%h/vault/04 — Проекты/Поиск работы/дайджесты" \
+    --journal "%h/vault/04 — Проекты/Поиск работы/job_log.md" \
+    --resume-dir "%h/vault/04 — Проекты/Поиск работы/резюме"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
