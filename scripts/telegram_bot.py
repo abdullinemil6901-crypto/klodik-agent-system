@@ -25,6 +25,10 @@ import telegram_digest as delivery
 API_URL_TEMPLATE = "https://api.telegram.org/bot{token}/{method}"
 POLL_TIMEOUT_SEC = 50
 MAX_CALLBACK_DATA = 64  # лимит Telegram на callback_data
+MAX_FLOOD_WAITS = 5  # предохранитель от бесконечного цикла по HTTP 429
+
+# ID вакансии из callback_data: что не совпало — в журнал не пишется
+ITEM_ID_RE = re.compile(r"[\w-]+")
 
 # Строка items[] по контракту digest_format.md
 ITEM_RE = re.compile(
@@ -62,18 +66,26 @@ def api_call(token, method, payload, timeout):
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
+    flood_waits = 0
+    while True:
         try:
-            description = json.loads(error.read().decode("utf-8")).get("description", "")
-        except (ValueError, OSError):
-            description = ""
-        raise BotError(f"Bot API HTTP {error.code} ({method}): {description}")
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        reason = getattr(error, "reason", error)
-        raise BotError(f"сеть ({method}): {type(error).__name__}: {reason}")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            try:
+                body = json.loads(error.read().decode("utf-8"))
+            except (ValueError, OSError):
+                body = {}
+            if error.code == 429 and flood_waits < MAX_FLOOD_WAITS:
+                # flood-wait: дайджест из многих карточек не падает на середине
+                flood_waits += 1
+                time.sleep(body.get("parameters", {}).get("retry_after", 5))
+                continue
+            raise BotError(
+                f"Bot API HTTP {error.code} ({method}): {body.get('description', '')}")
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            reason = getattr(error, "reason", error)
+            raise BotError(f"сеть ({method}): {type(error).__name__}: {reason}")
 
 
 # --- Привязка чата ----------------------------------------------------------
@@ -91,6 +103,7 @@ def save_binding(chat_id):
     tmp = delivery.BINDING_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps({"chat_id": chat_id, "ts": int(time.time())}),
                    encoding="utf-8")
+    os.chmod(tmp, 0o600)
     os.replace(tmp, delivery.BINDING_FILE)
 
 
@@ -153,7 +166,9 @@ def send_digest(ctx, chat_id=None):
         return
     text = digest_path.read_text(encoding="utf-8")
     _, body = delivery.split_front_matter(text)
-    ctx["items"] = parse_items(text)
+    # Карточки хранятся per-chat: /digest из двух чатов не перетирает контекст
+    items = parse_items(text)
+    ctx.setdefault("items_by_chat", {})[chat_id] = items
     ctx["decided"] = set()
     summary, cards = split_cards(body)
 
@@ -166,7 +181,7 @@ def send_digest(ctx, chat_id=None):
 
     send(delivery.md_to_html(summary))
     for card in cards:
-        item = next((i for i in ctx["items"] if i["url"] in card), None)
+        item = next((i for i in items if f"]({i['url']})" in card), None)
         send(delivery.md_to_html(card),
              card_keyboard(item) if item is not None else None)
 
@@ -207,8 +222,14 @@ def download_document(ctx, document):
             data = response.read()
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         raise BotError(f"скачивание файла: {type(error).__name__}")
-    target = Path(ctx["resume_dir"]) / (document.get("file_name") or Path(file_path).name)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # Имени из Telegram не доверяем: только базовое имя, без путей и скрытых файлов
+    raw_name = document.get("file_name") or Path(file_path).name
+    name = Path(raw_name).name.lstrip(".") or "resume_upload"
+    resume_dir = Path(ctx["resume_dir"]).resolve()
+    target = (resume_dir / name).resolve()
+    if target.parent != resume_dir:
+        raise BotError(f"недопустимое имя файла: {raw_name!r}")
+    resume_dir.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     return target
 
@@ -221,12 +242,28 @@ def allowed_chats(ctx):
     return allowed
 
 
+def bind_allowed(ctx, chat, text):
+    """Подтверждение владельца при привязке.
+
+    TELEGRAM_OWNER_ID — привязка только из этого чата; TELEGRAM_BIND_SECRET —
+    только по «/start <секрет>» (deep-link t.me/<бот>?start=<секрет>). Ничего
+    не задано — first-come по первому /start, как раньше.
+    """
+    if ctx.get("owner_id") is not None and chat != ctx["owner_id"]:
+        return False
+    secret = ctx.get("bind_secret")
+    if secret:
+        parts = text.split(maxsplit=1)
+        return len(parts) == 2 and parts[1].strip() == secret
+    return True
+
+
 def handle_message(ctx, message):
     chat = message.get("chat", {}).get("id")
     text = (message.get("text") or "").strip()
     if ctx["chat_id"] is None:
-        # Самопривязка: первый /start фиксирует чат
-        if text.startswith("/start") and chat is not None:
+        # Самопривязка: первый прошедший проверку владельца /start фиксирует чат
+        if text.startswith("/start") and chat is not None and bind_allowed(ctx, chat, text):
             ctx["chat_id"] = chat
             save_binding(chat)
             api_call(ctx["token"], "sendMessage",
@@ -260,7 +297,10 @@ def handle_callback(ctx, callback):
     if chat not in allowed_chats(ctx):
         return
     action, _, item_id = callback.get("data", "").partition(":")
-    item = next((i for i in ctx.get("items", []) if i["id"] == item_id), None)
+    if not ITEM_ID_RE.fullmatch(item_id):
+        item_id = ""  # мусор из callback_data не попадает в журнал
+    items = ctx.get("items_by_chat", {}).get(chat, [])
+    item = next((i for i in items if i["id"] == item_id), None)
     answer = {"callback_query_id": callback["id"]}
     if action in ("w", "s", "i") and item is not None:
         if ctx["journal"]:
@@ -340,7 +380,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     file_values = delivery.load_env_file(args.env_file) if args.env_file else {}
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or file_values.get("TELEGRAM_BOT_TOKEN")
+
+    def get(key, default=None):
+        return os.environ.get(key) or file_values.get(key) or default
+
+    token = get("TELEGRAM_BOT_TOKEN")
     if not token:
         print("ошибка конфигурации: не задан TELEGRAM_BOT_TOKEN "
               "(окружение или --env-file)", file=sys.stderr)
@@ -352,14 +396,16 @@ def main(argv=None):
         print(f"токен не работает: {error}", file=sys.stderr)
         return 1
 
-    raw_ids = (os.environ.get("TELEGRAM_CHAT_IDS")
-               or file_values.get("TELEGRAM_CHAT_IDS") or "")
+    raw_ids = get("TELEGRAM_CHAT_IDS", "")
     extra_chats = {int(part) for part in raw_ids.split(",") if part.strip().isdigit()}
+    owner_raw = get("TELEGRAM_OWNER_ID", "")
 
     ctx = {
         "token": token,
         "chat_id": load_binding(),
         "extra_chats": extra_chats,
+        "owner_id": int(owner_raw) if owner_raw.lstrip("-").isdigit() else None,
+        "bind_secret": get("TELEGRAM_BIND_SECRET"),
         "digest_dir": args.digest_dir,
         "journal": args.journal,
         "resume_dir": args.resume_dir,
@@ -367,7 +413,8 @@ def main(argv=None):
     }
     name = me.get("username", "?")
     if ctx["chat_id"] is None:
-        print(f"бот @{name} запущен, чат не привязан: открой t.me/{name} и нажми /start")
+        start = "/start <TELEGRAM_BIND_SECRET>" if ctx["bind_secret"] else "/start"
+        print(f"бот @{name} запущен, чат не привязан: открой t.me/{name} и отправь {start}")
     else:
         print(f"бот @{name} запущен, чат привязан: {ctx['chat_id']}")
     poll_loop(ctx, once=args.once)

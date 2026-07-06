@@ -34,6 +34,7 @@ EXIT_NO_DIGEST = 3
 DEFAULT_TIMEOUT_SEC = 10
 DEFAULT_RETRIES = 3
 MAX_FLOOD_WAITS = 5  # предохранитель от бесконечного цикла по HTTP 429
+MAX_STATE_ENTRIES = 200  # журнал идемпотентности не растёт бесконечно
 
 
 class DeliveryError(Exception):
@@ -285,12 +286,20 @@ def sent_parts(state, key, total):
 
 def mark_progress(state, key, parts_done, total):
     """Прогресс пишется после каждой части: повторный запуск не шлёт дубли."""
-    state.setdefault("sent", {})[key] = {
+    sent = state.setdefault("sent", {})
+    sent[key] = {
         "parts_done": parts_done, "total": total, "ts": int(time.time()),
     }
+    if len(sent) > MAX_STATE_ENTRIES:
+        # Самые старые записи выбрасываются; старый формат (не dict) — старее всех
+        def age(entry):
+            return entry[1].get("ts", 0) if isinstance(entry[1], dict) else 0
+        for stale, _ in sorted(sent.items(), key=age)[:len(sent) - MAX_STATE_ENTRIES]:
+            del sent[stale]
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STATE_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
+    os.chmod(tmp, 0o600)
     os.replace(tmp, STATE_FILE)  # атомарно: краш не оставит битый JSON
 
 

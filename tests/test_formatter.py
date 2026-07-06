@@ -113,6 +113,21 @@ class TestDigestKey(unittest.TestCase):
         self.assertEqual(key, td.digest_key({}, "тело"))
 
 
+class TestStateHousekeeping(unittest.TestCase):
+    def test_old_entries_pruned_and_file_private(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = Path(tmp) / "sent_digests.json"
+            state = {"sent": {f"run-{i}": {"parts_done": 1, "total": 1, "ts": i}
+                              for i in range(td.MAX_STATE_ENTRIES)}}
+            with mock.patch.object(td, "STATE_FILE", state_file):
+                td.mark_progress(state, "run-new", 1, 1)
+            self.assertEqual(len(state["sent"]), td.MAX_STATE_ENTRIES)
+            self.assertIn("run-new", state["sent"])
+            self.assertNotIn("run-0", state["sent"])  # самая старая запись ушла
+            self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+
+
 class TestTokenSanitization(unittest.TestCase):
     CONFIG = {"token": "SECRET123:TOKEN", "chat_id": "42",
               "timeout": 0.1, "retries": 1}

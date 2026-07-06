@@ -7,6 +7,7 @@
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -84,7 +85,7 @@ def make_ctx(chat_id=42, journal=None, resume_dir=None, extra_chats=()):
     return {"token": "t", "chat_id": chat_id, "digest_dir": None,
             "journal": journal, "resume_dir": resume_dir, "timeout": 1,
             "extra_chats": set(extra_chats),
-            "items": bot.parse_items(DIGEST), "decided": set()}
+            "items_by_chat": {42: bot.parse_items(DIGEST)}, "decided": set()}
 
 
 class TestResumeIntake(unittest.TestCase):
@@ -142,7 +143,7 @@ class TestAuthorization(unittest.TestCase):
     def test_old_message_button_falls_back_to_journal(self):
         with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
             ctx = make_ctx(journal=handle.name)
-            ctx["items"] = []  # бот перезапущен, карточек в памяти нет
+            ctx["items_by_chat"] = {}  # бот перезапущен, карточек в памяти нет
             calls = []
             with mock.patch.object(bot, "api_call",
                                    side_effect=lambda t, m, p, s: calls.append((m, p))):
@@ -196,7 +197,7 @@ class TestCallback(unittest.TestCase):
     def test_interview_without_card_context_still_journaled(self):
         with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
             ctx = make_ctx(journal=handle.name)
-            ctx["items"] = []  # бот перезапущен, карточек в памяти нет
+            ctx["items_by_chat"] = {}  # бот перезапущен, карточек в памяти нет
             calls = []
             with mock.patch.object(bot, "api_call",
                                    side_effect=lambda t, m, p, s: calls.append((m, p))):
@@ -214,6 +215,99 @@ class TestCallback(unittest.TestCase):
             bot.handle_callback(ctx, {"id": "cb2", "data": "w:JV-9999",
                                       "message": {"chat": {"id": 42}, "message_id": 7}})
         self.assertEqual([m for m, _ in calls], ["answerCallbackQuery"])
+
+
+class TestDownloadSafety(unittest.TestCase):
+    def _download(self, tmp, file_name):
+        ctx = make_ctx(resume_dir=tmp)
+        info = {"result": {"file_path": "documents/file_1.pdf"}}
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"data"
+        with mock.patch.object(bot, "api_call", return_value=info), \
+                mock.patch.object(bot.urllib.request, "urlopen",
+                                  return_value=response):
+            return bot.download_document(ctx, {"file_id": "f",
+                                               "file_name": file_name})
+
+    def test_traversal_name_stays_in_resume_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self._download(tmp, "../../evil.md")
+            self.assertEqual(Path(target).parent, Path(tmp).resolve())
+            self.assertEqual(Path(target).name, "evil.md")
+
+    def test_absolute_name_stays_in_resume_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self._download(tmp, "/etc/passwd")
+            self.assertEqual(Path(target).parent, Path(tmp).resolve())
+
+    def test_hidden_or_empty_name_gets_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = self._download(tmp, "...")
+            self.assertEqual(Path(target).name, "resume_upload")
+            self.assertEqual(Path(target).parent, Path(tmp).resolve())
+
+
+class TestBindingGuards(unittest.TestCase):
+    def test_wrong_secret_ignored(self):
+        ctx = make_ctx(chat_id=None)
+        ctx["bind_secret"] = "s3cret"
+        with mock.patch.object(bot, "api_call") as api, \
+                mock.patch.object(bot, "save_binding") as save:
+            bot.handle_message(ctx, {"chat": {"id": 42}, "text": "/start"})
+            bot.handle_message(ctx, {"chat": {"id": 42}, "text": "/start guess"})
+        self.assertIsNone(ctx["chat_id"])
+        api.assert_not_called()
+        save.assert_not_called()
+
+    def test_correct_secret_binds(self):
+        ctx = make_ctx(chat_id=None)
+        ctx["bind_secret"] = "s3cret"
+        with mock.patch.object(bot, "api_call"), \
+                mock.patch.object(bot, "save_binding"):
+            bot.handle_message(ctx, {"chat": {"id": 42}, "text": "/start s3cret"})
+        self.assertEqual(ctx["chat_id"], 42)
+
+    def test_owner_id_enforced(self):
+        ctx = make_ctx(chat_id=None)
+        ctx["owner_id"] = 42
+        with mock.patch.object(bot, "api_call"), \
+                mock.patch.object(bot, "save_binding"):
+            bot.handle_message(ctx, {"chat": {"id": 999}, "text": "/start"})
+            self.assertIsNone(ctx["chat_id"])
+            bot.handle_message(ctx, {"chat": {"id": 42}, "text": "/start"})
+        self.assertEqual(ctx["chat_id"], 42)
+
+
+class TestCallbackValidation(unittest.TestCase):
+    def test_garbage_item_id_not_journaled(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md", delete=False) as handle:
+            ctx = make_ctx(journal=handle.name)
+            ctx["items_by_chat"] = {}
+            calls = []
+            with mock.patch.object(bot, "api_call",
+                                   side_effect=lambda t, m, p, s: calls.append((m, p))):
+                bot.handle_callback(ctx, {"id": "cb7", "data": "w:a|b",
+                                          "message": {"chat": {"id": 42},
+                                                      "message_id": 5}})
+            journal_text = Path(handle.name).read_text(encoding="utf-8")
+        self.assertEqual(journal_text, "")
+        self.assertEqual([m for m, _ in calls], ["answerCallbackQuery"])
+        self.assertIn("устарела", calls[0][1]["text"])
+
+
+class TestFloodWait(unittest.TestCase):
+    def test_429_waits_and_retries(self):
+        flood = urllib.error.HTTPError(
+            url="x", code=429, msg="Too Many Requests", hdrs=None,
+            fp=mock.Mock(read=lambda: b'{"parameters": {"retry_after": 7}}'))
+        ok = mock.MagicMock()
+        ok.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with mock.patch.object(bot.urllib.request, "urlopen",
+                               side_effect=[flood, ok]), \
+                mock.patch.object(bot.time, "sleep") as sleep:
+            result = bot.api_call("t", "sendMessage", {}, 1)
+        self.assertTrue(result["ok"])
+        sleep.assert_called_once_with(7)
 
 
 class TestChatIdFallback(unittest.TestCase):
